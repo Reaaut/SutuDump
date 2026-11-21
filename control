@@ -1,0 +1,9 @@
+Package: com.yg.sutudump
+Name: SutuDump
+Version: 2.0.0
+Architecture: iphoneos-arm64
+Description: 微信主题包密码抓取 + 自动解包（外层/内层递归拆到 PNG）
+Maintainer: YG
+Author: YG
+Section: Tweaks
+Depends: mobilesubstrate

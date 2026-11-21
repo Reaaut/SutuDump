@@ -1,0 +1,55 @@
+name: build
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Theos
+        run: |
+          brew install ldid xz make
+          export THEOS=$HOME/theos
+          git clone --recursive https://github.com/theos/theos.git $THEOS
+          mkdir -p $THEOS/sdks
+          curl -sL https://github.com/theos/sdks/archive/master.tar.gz -o /tmp/sdks.tar.gz
+          tar xzf /tmp/sdks.tar.gz -C /tmp
+          cp -R /tmp/sdks-master/*.sdk $THEOS/sdks/ || true
+          ls $THEOS/sdks
+
+      - name: Build deb (rootless)
+        run: |
+          export THEOS=$HOME/theos
+          export PATH=$THEOS/bin:$PATH
+          make clean || true
+          make package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1
+
+      - name: Build deb (rootful)
+        run: |
+          export THEOS=$HOME/theos
+          export PATH=$THEOS/bin:$PATH
+          make clean || true
+          make package FINALPACKAGE=1
+          mkdir -p dist
+          cp packages/*.deb dist/ || true
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p dist out
+          cp packages/*.deb dist/ 2>/dev/null || true
+          for f in $(find .theos -name "SutuDump.dylib" 2>/dev/null); do
+            cp "$f" "out/$(basename $(dirname $(dirname $f)))_SutuDump.dylib"
+          done
+          ls -R dist out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SutuDump-build
+          path: |
+            dist/*.deb
+            out/*.dylib
+          if-no-files-found: warn
