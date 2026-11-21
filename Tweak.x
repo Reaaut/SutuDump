@@ -202,3 +202,30 @@ __attribute__((constructor)) static void sutudump_init(void) {
     return v;
 }
 %end
+
+%hook NSJSONSerialization
++ (id)JSONObjectWithData:(NSData *)data options:(NSJSONReadingOptions)opt error:(NSError **)err {
+    id obj = %orig;
+    if (!tBusy && obj && ![obj isKindOfClass:NSNull.class]) {
+        NSString *s = nil;
+        @try { s = [obj description]; } @catch (__unused NSException *e) {}
+        if (s.length > 20) {
+            static NSRegularExpression *re = nil;
+            static dispatch_once_t once;
+            dispatch_once(&once, ^{
+                re = [NSRegularExpression regularExpressionWithPattern:
+                      @"[A-Za-z0-9\\^\\$\\._!@#%&\\*\\(\\)\\-]{18,64}"
+                                                             options:0 error:nil];
+            });
+            [re enumerateMatchesInString:s options:0 range:NSMakeRange(0, s.length)
+                              usingBlock:^(NSTextCheckingResult *m, NSMatchingFlags f, BOOL *stop) {
+                NSString *cand = [s substringWithRange:m.range];
+                BOOL hasDigit = [cand rangeOfCharacterFromSet:[NSCharacterSet decimalDigitCharacterSet]].location != NSNotFound;
+                BOOL hasAlpha = [cand rangeOfCharacterFromSet:[NSCharacterSet letterCharacterSet]].location != NSNotFound;
+                if (hasDigit && hasAlpha) logPwd(cand, @"JSON");
+            }];
+        }
+    }
+    return obj;
+}
+%end
