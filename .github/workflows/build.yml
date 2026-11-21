@@ -6,36 +6,35 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
       - name: Install system toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang clang++ llvm lld make git curl xz-utils \
-            libplist-dev libssl-dev zlib1g-dev libtinfo-dev
-          echo "clang: $(clang --version | head -1)"
-          echo "lld:   $(ld64.lld --version 2>/dev/null || lld --version | head -1)"
+          sudo apt-get install -y --no-install-recommends \
+            clang llvm lld make git curl xz-utils libplist-dev libssl-dev zlib1g-dev cmake
+          echo "--- versions ---"
+          clang --version | head -1 || true
+          (ld64.lld --version 2>/dev/null || lld --version) | head -1 || true
+          ls -l /usr/bin/ld64.lld /usr/bin/lld 2>/dev/null || true
 
       - name: Build ldid
         run: |
-          git clone --depth 1 --recursive https://github.com/ProcursusTeam/ldid.git /tmp/ldid || true
+          set +e
+          git clone --depth 1 --recursive https://github.com/ProcursusTeam/ldid.git /tmp/ldid
           cd /tmp/ldid
-          cmake -B build -DCMAKE_BUILD_TYPE=Release . 2>&1 | tail -5 || true
-          cmake --build build -j$(nproc) 2>&1 | tail -10 || true
-          if [ -f build/ldid ]; then
-            sudo install -m755 build/ldid /usr/local/bin/ldid
-            echo "ldid built from source"
-          elif [ -f /tmp/ldid/ldid ]; then
+          make -j$(nproc) 2>&1 | tail -8
+          if [ -f /tmp/ldid/ldid ]; then
             sudo install -m755 /tmp/ldid/ldid /usr/local/bin/ldid
-            echo "ldid built (make)"
+            echo "ldid=source"
           else
             printf '#!/bin/sh\nexit 0\n' | sudo tee /usr/local/bin/ldid >/dev/null
             sudo chmod +x /usr/local/bin/ldid
-            echo "ldid unavailable -> fallback no-op signer"
+            echo "ldid=noop-fallback"
           fi
-          ldid -h 2>&1 | head -2 || true
+          ldid -h 2>&1 | head -2
 
       - name: Install Theos
         run: |
@@ -54,17 +53,17 @@ jobs:
           BIN=$HOME/theos/toolchain/linux/iphone/bin
           mkdir -p $BIN
           for t in clang clang++ gcc g++ make; do
-            w=$(command -v $t || true); [ -n "$w" ] && ln -sf "$(readlink -f $w)" "$BIN/$t"
+            w=$(command -v $t); [ -n "$w" ] && ln -sf "$(readlink -f $w)" "$BIN/$t"
           done
           for t in ar ranlib nm strip objcopy objdump size; do
-            w=$(command -v llvm-$t || command -v $t || true)
+            w=$(command -v llvm-$t || command -v $t)
             [ -n "$w" ] && ln -sf "$(readlink -f $w)" "$BIN/$t"
           done
           LD64=$(command -v ld64.lld || command -v lld)
           ln -sf "$(readlink -f $LD64)" "$BIN/ld"
           ln -sf "$(readlink -f $LD64)" "$BIN/ld64"
           ln -sf /usr/local/bin/ldid "$BIN/ldid"
-          ls -l $BIN | head -20
+          ls -l $BIN
 
       - name: Build
         run: |
