@@ -6,50 +6,58 @@ on:
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld make git curl xz-utils ldid libplist-dev libssl-dev
+          echo "clang: $(clang --version | head -1)"
+          echo "ldid: $(ldid -h 2>&1 | head -1 || echo missing)"
+
       - name: Install Theos
         run: |
-          brew install ldid xz make
           export THEOS=$HOME/theos
-          git clone --recursive https://github.com/theos/theos.git $THEOS
+          git clone --recursive --depth 1 https://github.com/theos/theos.git $THEOS
           mkdir -p $THEOS/sdks
           curl -sL https://github.com/theos/sdks/archive/master.tar.gz -o /tmp/sdks.tar.gz
           tar xzf /tmp/sdks.tar.gz -C /tmp
-          cp -R /tmp/sdks-master/*.sdk $THEOS/sdks/ || true
+          cp -R /tmp/sdks-master/*.sdk $THEOS/sdks/ 2>/dev/null || true
           ls $THEOS/sdks
+          echo "THEOS=$THEOS" >> $GITHUB_ENV
+          echo "$THEOS/bin" >> $GITHUB_PATH
 
-      - name: Build deb (rootless)
+      - name: Install ld64 (cctools-port)
         run: |
-          export THEOS=$HOME/theos
-          export PATH=$THEOS/bin:$PATH
-          make clean || true
-          make package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1
+          sudo apt-get install -y build-essential cmake
+          git clone --depth 1 https://github.com/tpoechtrager/cctools-port.git /tmp/cctools
+          cd /tmp/cctools/cctools
+          ./configure --prefix=/usr/local --target=arm64-apple-darwin --with-llvm-config=$(which llvm-config-15 || which llvm-config || echo "")
+          make -j$(nproc) 2>/dev/null || make -j2
+          sudo make install
+          which arm64-apple-darwin-ld || true
 
-      - name: Build deb (rootful)
+      - name: Build (rootless)
         run: |
-          export THEOS=$HOME/theos
-          export PATH=$THEOS/bin:$PATH
           make clean || true
-          make package FINALPACKAGE=1
-          mkdir -p dist
-          cp packages/*.deb dist/ || true
+          make package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1 2>&1 | tail -50
 
-      - name: Collect artifacts
+      - name: Collect
+        if: always()
         run: |
           mkdir -p dist out
           cp packages/*.deb dist/ 2>/dev/null || true
-          for f in $(find .theos -name "SutuDump.dylib" 2>/dev/null); do
-            cp "$f" "out/$(basename $(dirname $(dirname $f)))_SutuDump.dylib"
-          done
-          ls -R dist out
+          find .theos -name "SutuDump.dylib" -exec cp {} out/ \; 2>/dev/null || true
+          ls -lR dist out || true
 
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: SutuDump-build
           path: |
             dist/*.deb
             out/*.dylib
+            packages/*.deb
           if-no-files-found: warn
