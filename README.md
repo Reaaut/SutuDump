@@ -1,86 +1,84 @@
-﻿# SutuDump v2
+# SutuDump v2
 
-寰俊涓婚鍖咃紙`.rbt` / `Assets.rbt`锛夊瘑鐮佹姄鍙?+ 鑷姩瑙ｅ寘銆?
-## 涓ょ鐢ㄦ硶
+微信主题包（`.rbt` / `Assets.rbt`）密码抓取 + 自动解包。
 
-### A. Frida锛堥浂缂栬瘧锛岀珛鍒荤敤锛?
+## 两种用法
+
+### A. Frida（零编译，立刻用）
+
 ```bash
 frida -U -f <AppBundleID> -l frida_sutu.js --no-pause
 ```
 
-鎴栧凡杩愯锛?
+或已运行：
+
 ```bash
-frida -U -n <杩涚▼鍚? -l frida_sutu.js
+frida -U -n <进程名> -l frida_sutu.js
 ```
 
-鎵撳紑涓婚鍟嗗簵椤?/ 瀵煎叆涓婚锛屾棩蹇楅噷鍑虹幇锛?
+打开主题商店页 / 导入主题，日志里出现：
+
 ```
 [SUTU] PWD xxxxxxxx  (ZZOld)
 [SUTU] unpacked 1551 entries -> /var/mobile/Documents/sutu_dump/out/xxxxxx
 ```
 
-浜х墿锛?
+产物：
+
 ```
 /var/mobile/Documents/sutu_dump/
-鈹溾攢 pwd.txt             涓€琛屼竴涓瘑鐮侊紙鍘婚噸锛?瀵嗙爜>\t<鏉ユ簮>锛?鈹溾攢 raw/                鎶撳埌鐨勫灞?rbt
-鈹斺攢 out/<pwd鍓?浣?/     鑷姩鎷嗗ソ鐨?PNG锛堝灞?鍐呭眰閫掑綊鎷嗗畬锛?```
+├─ pwd.txt             一行一个密码（去重）
+├─ raw/                抓到的外层 rbt
+└─ out/<pwd前6位>/     自动拆好的 PNG（外层+内层递归拆完）
+```
 
-### B. 缂栬瘧鎴?dylib锛堣 .dylib / .deb 鐢ㄨ繖涓級
+### B. 编译成 dylib
 
-鏈満娌℃湁 macOS 宸ュ叿閾撅紝鐢?GitHub Actions 鑷姩缂栵細
-
-1. 鏂板缓浠撳簱锛屾妸鏈洰褰曪紙鍚?`.github/`锛塸ush 涓婂幓
-2. Actions 鑷姩璺?`macos-14` runner锛岃 Theos + iOS SDK
-3. 璺戝畬鍦?Artifacts 閲屼笅 `SutuDump-build`锛?   - `*.deb`锛坮ootless 鐗堬級
-   - `*_SutuDump.dylib`锛堝彲鐩存帴涓㈣繘 MobileSubstrate 鐩綍锛?
-鏈湴 Mac 缂栬瘧锛?
 ```bash
 export THEOS=~/theos
 make clean
 make package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1
 ```
 
-瀹夎锛?
+安装：
+
 ```bash
 scp packages/*.deb root@device:/var/root/
 ssh root@device "dpkg -i /var/root/*.deb && killall -9 SpringBoard"
 ```
 
-## 娉ㄥ叆鐩爣
+仓库自带 `.github/workflows/build.yml`，push 后 GitHub Actions 会自动编出 deb 和 dylib 作为 Artifacts。
 
-`SutuDump.plist` 閲岀殑 `Bundles` 瑕佸～浣犺澶囦笂閭ｄ釜 App 鐨?bundle id锛?
+## 注入目标
+
+`SutuDump.plist` 里的 `Bundles` 要填目标 App 的 bundle id：
+
 ```
-Filza 鈫?/var/containers/Bundle/Application/<UUID>/xxx.app/Info.plist 鈫?CFBundleIdentifier
+Filza → /var/containers/Bundle/Application/<UUID>/xxx.app/Info.plist → CFBundleIdentifier
 ```
 
-涓嶇煡閬撶殑璇濆厛濉?`com.apple.springboard` 娴嬪姞杞斤紝鍐嶆崲鎴愮湡瀹?id銆?
-## hook 鐐?
-| 绫?/ 鏂规硶 | 浣滅敤 |
+## hook 点
+
+| 类 / 方法 | 作用 |
 |---|---|
-| `ZZOldArchiveEntry -newDataWithPassword:error:` | 涓诲瘑鐮佹潵婧愶紙澶栧眰 rbt锛?|
-| `ZZNewArchiveEntry -newDataWithPassword:error:` | 鏂版牸寮忔潯鐩?|
-| `ZZStandardDecryptInputStream -initWithStream:password:header:check:version:error:` | ZipCrypto 搴曞眰瀵嗙爜 + check |
-| `NSJSONSerialization +JSONObjectWithData:options:error:` | 浠庢帴鍙ｅ搷搴旈噷鐩存帴鎹炲瘑鐮侊紙涓嶇敤涓嬭浇涓婚锛?|
-| `NSUserDefaults -objectForKey:` (`ThemeCurentAssetFloderNameKey`) | 璁板綍涓婚缂撳瓨鐪熷疄璺緞锛屾柟渚垮鍖呰Е鍙?|
+| `ZZOldArchiveEntry -newDataWithPassword:error:` | 主密码来源（外层 rbt） |
+| `ZZNewArchiveEntry -newDataWithPassword:error:` | 新格式条目 |
+| `NSJSONSerialization +JSONObjectWithData:options:error:` | 从接口响应里捞密码（不用下载主题） |
+| `NSUserDefaults -objectForKey:` (`ThemeCurentAssetFloderNameKey`) | 记录主题缓存路径 |
 
-## 鏂规 4锛氫笉涓嬭浇涔熻兘瑙﹀彂
+所有 ZipZap 的 selector 都通过 `NSSelectorFromString` + `objc_msgSend` 调用，不依赖 ZipZap 头文件，兼容新旧 API 命名。
 
-1. 鎵撳紑 App 杩涗竴娆′富棰橀〉 鈫?`theme_folder.txt` 閲屽嚭鐜扮湡瀹炵紦瀛樿矾寰?2. 鎶婂埆浜哄彂浣犵殑 `.rbt` 鏀瑰悕 `Assets.rbt`锛屽杩涜涓婚鐩綍
-3. 鍥?App 鐐硅繖涓富棰樼殑**棰勮**锛堜笉鐐瑰簲鐢級
-4. `pwd.txt` 澶氫竴琛岋紝`out/` 鐩存帴鍑?PNG
+## 方案 B2：不下载也能触发
 
-鍏ㄧ▼涓嶄笅杞姐€佷笉搴旂敤涓婚銆?
-## 宸茬煡鍐呭眰瀵嗙爜
+1. 打开 App 进一次主题页 → `theme_folder.txt` 里出现真实缓存路径
+2. 把别人发你的 `.rbt` 改名 `Assets.rbt`，塞进该主题目录
+3. 回 App 点这个主题的**预览**（不点应用）
+4. `pwd.txt` 多一行，`out/` 直接出 PNG
 
-鎵€鏈変富棰樼殑鍐呭眰璧勬簮瀵嗙爜缁熶竴涓猴細
+## 电脑端批量解密
 
-```
-2E@Qws#b9MQ6p4^sRS
-```
-
-澶栧眰瀵嗙爜鎸夌郴鍒椾笅鍙戯紙鍚岀郴鍒楀叡鐢ㄤ竴涓級锛岀洰鍓嶅凡鎶撳埌锛?
-```
-^or$.^WLkaUs6crfVEkg!Q!EbO0d2eXi1Hsn_YbSK^8z7pWIz4I   鈫?Gossip 绯诲垪
-zfnl7nfiyC$WLQGbF8NDgPrQCudgRcipuFOZOzXpZgunWGm4oU!   鈫?Paste 绯诲垪
+```bash
+python pc_unpack.py --rbt <Assets.rbt> --log <pwd.txt> --out <输出目录>
 ```
 
+自动从 log 里抓全部 `pwd=[...]`，逐层拆包直到真实文件。
