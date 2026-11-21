@@ -13,9 +13,20 @@ static __thread BOOL tBusy = NO;
 
 static NSString *pickRoot(void) {
     NSFileManager *fm = NSFileManager.defaultManager;
-    NSArray *cands = @[@"/var/mobile/Documents/sutu_dump",
-                       @"/var/jb/var/mobile/Documents/sutu_dump",
-                       @"/var/tmp/sutu_dump"];
+    NSMutableArray *cands = [NSMutableArray array];
+
+    // 1) 宿主 App 自己的沙盒（注入微信就落到微信主路径）
+    NSString *home = NSHomeDirectory();
+    if (home.length) {
+        [cands addObject:[home stringByAppendingPathComponent:@"Documents/sutu_dump"]];
+        [cands addObject:[home stringByAppendingPathComponent:@"Library/sutu_dump"]];
+        [cands addObject:[home stringByAppendingPathComponent:@"tmp/sutu_dump"]];
+    }
+    // 2) 全局可写位置做兜底
+    [cands addObject:@"/var/mobile/Documents/sutu_dump"];
+    [cands addObject:@"/var/jb/var/mobile/Documents/sutu_dump"];
+    [cands addObject:@"/var/tmp/sutu_dump"];
+
     for (NSString *c in cands) {
         BOOL isDir = NO;
         if ([fm fileExistsAtPath:c isDirectory:&isDir] && isDir) return c;

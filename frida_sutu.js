@@ -1,21 +1,28 @@
 /*
  * SutuDump v2 — Frida 版（零编译，直接跑）
  *
- * 用法：
- *   frida -U -f com.xxx.sutuplus -l frida_sutu.js --no-pause
- *   frida -U -n SutuPLUS -l frida_sutu.js
+ * 输出目录跟随宿主 App 沙盒：
+ *   <AppHome>/Documents/sutu_dump/
  *
- * 输出（设备上）：
- *   /var/mobile/Documents/sutu_dump/pwd.txt            一行一个密码（去重）
- *   /var/mobile/Documents/sutu_dump/raw/*.rbt          抓到的外层包
- *   /var/mobile/Documents/sutu_dump/out/<pwd前6位>/    自动拆好的 PNG
+ * 用法：
+ *   frida -U -f <BundleID> -l frida_sutu.js --no-pause
+ *   frida -U -n <进程名> -l frida_sutu.js
  */
 
-const ROOT = '/var/mobile/Documents/sutu_dump';
 const INNER_PW = '2E@Qws#b9MQ6p4^sRS';
+let ROOT = '/var/mobile/Documents/sutu_dump';
 let seen = new Set();
 let pwds = [];
 let inUnpack = false;
+
+function homeDir() {
+  try {
+    const env = ObjC.classes.NSProcessInfo.processInfo().environment();
+    const h = env.objectForKey_('HOME');
+    if (h && !h.isNull()) return h.toString();
+  } catch (e) {}
+  return '/var/mobile';
+}
 
 function NS(s) { return ObjC.classes.NSString.stringWithString_(s); }
 function nsToJs(nsstr) {
@@ -27,15 +34,19 @@ function mkdir(p) {
     .createDirectoryAtPath_withIntermediateDirectories_attributes_error_(NS(p), 1, NULL, NULL);
 }
 
+function writeFile(path, text) {
+  ObjC.classes.NSData.dataWithBytes_length_(text, text.length)
+    .writeToFile_atomically_(NS(path), 1);
+}
+
 function appendFile(path, text) {
   const fm = ObjC.classes.NSFileManager.defaultManager();
-  if (!fm.fileExistsAtPath_(NS(path))) {
-    ObjC.classes.NSData.dataWithBytes_length_(text, text.length).writeToFile_atomically_(NS(path), 1);
-    return;
+  let merged = text;
+  if (fm.fileExistsAtPath_(NS(path))) {
+    const old = ObjC.classes.NSString.stringWithContentsOfFile_encoding_error_(NS(path), 4, NULL);
+    if (old && !old.isNull()) merged = old.toString() + text;
   }
-  const old = ObjC.classes.NSString.stringWithContentsOfFile_encoding_error_(NS(path), 4, NULL);
-  const merged = (old.isNull() ? '' : old.toString()) + text;
-  ObjC.classes.NSData.dataWithBytes_length_(merged, merged.length).writeToFile_atomically_(NS(path), 1);
+  writeFile(path, merged);
 }
 
 function logPwd(pwd, src) {
@@ -48,11 +59,8 @@ function logPwd(pwd, src) {
 
 function isZip(nsdata) {
   try {
-    const len = nsdata.length();
-    if (len < 4) return false;
-    const p = nsdata.bytes();
-    const b = Memory.readByteArray(p, 2);
-    const u = new Uint8Array(b);
+    if (nsdata.length() < 4) return false;
+    const u = new Uint8Array(Memory.readByteArray(nsdata.bytes(), 2));
     return u[0] === 0x50 && u[1] === 0x4b;
   } catch (e) { return false; }
 }
@@ -69,22 +77,21 @@ function unpack(dataObj, hint, outDir, depth) {
     if (!ZZArchive) { console.log('[SUTU] no ZZArchive'); return; }
     const url = ObjC.classes.NSURL.fileURLWithPath_(NS(tmp));
     const archive = ZZArchive.archiveWithURL_error_(url, NULL);
-    if (archive.isNull()) return;
+    if (!archive || archive.isNull()) return;
 
     const cands = [];
     if (hint) cands.push(hint);
-    pwds.forEach(p => { if (!cands.includes(p)) cands.push(p); });
-    if (!cands.includes(INNER_PW)) cands.push(INNER_PW);
+    pwds.forEach(p => { if (cands.indexOf(p) < 0) cands.push(p); });
+    if (cands.indexOf(INNER_PW) < 0) cands.push(INNER_PW);
 
     let entries = null, used = null;
-    for (const p of cands) {
+    for (let i = 0; i < cands.length; i++) {
+      const p = cands[i];
       let r = null;
       try {
-        if (archive.respondsToSelector_(ObjC.selector('newEntriesWithPassword:error:'))) {
-          r = archive.newEntriesWithPassword_error_(NS(p), NULL);
-        } else {
-          r = archive.entriesWithPassword_error_(NS(p), NULL);
-        }
+        r = archive.respondsToSelector_(ObjC.selector('newEntriesWithPassword:error:'))
+          ? archive.newEntriesWithPassword_error_(NS(p), NULL)
+          : archive.entriesWithPassword_error_(NS(p), NULL);
       } catch (e) { r = null; }
       if (r && !r.isNull() && r.count() > 0) { entries = r; used = p; break; }
     }
@@ -134,7 +141,7 @@ function hookPasswordMethod(clsName, tag) {
           if (isZip(d)) {
             const keep = d.retain();
             const dir = ROOT + '/out/' + pwd.substring(0, 6);
-            setTimeout(() => { unpack(new ObjC.Object(keep), pwd, dir, 0); }, 0);
+            setTimeout(function () { unpack(new ObjC.Object(keep), pwd, dir, 0); }, 0);
           }
         }
       } catch (e) { console.log('[SUTU] hook err ' + e); }
@@ -143,7 +150,6 @@ function hookPasswordMethod(clsName, tag) {
   console.log('[SUTU] hooked ' + clsName);
 }
 
-// 抓接口返回里的密码候选（不用下载主题，打开商店页就可能命中）
 function hookJSON() {
   const J = ObjC.classes.NSJSONSerialization;
   if (!J) return;
@@ -168,13 +174,15 @@ function hookJSON() {
 }
 
 function main() {
+  const home = homeDir();
+  ROOT = home + '/Documents/sutu_dump';
   mkdir(ROOT);
   mkdir(ROOT + '/out');
   mkdir(ROOT + '/raw');
   hookPasswordMethod('ZZOldArchiveEntry', 'ZZOld');
   hookPasswordMethod('ZZNewArchiveEntry', 'ZZNew');
   hookJSON();
-  console.log('[SUTU] ready, output -> ' + ROOT);
+  console.log('[SUTU] ready, home=' + home + ' output -> ' + ROOT);
 }
 
 setImmediate(main);
