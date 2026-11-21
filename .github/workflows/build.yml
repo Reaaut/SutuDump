@@ -6,13 +6,33 @@ on:
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install system toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang llvm lld make git curl xz-utils libplist-dev libssl-dev zlib1g-dev cmake
+          clang --version | head -1
+          ls -l /usr/bin/ld64.lld /usr/bin/ld.lld /usr/bin/lld 2>/dev/null || true
+
+      - name: Build ldid
+        run: |
+          set +e
+          git clone --depth 1 --recursive https://github.com/ProcursusTeam/ldid.git /tmp/ldid
+          cd /tmp/ldid && make -j$(nproc) 2>&1 | tail -5
+          if [ -f /tmp/ldid/ldid ]; then
+            sudo install -m755 /tmp/ldid/ldid /usr/local/bin/ldid
+          else
+            printf '#!/bin/sh\nexit 0\n' | sudo tee /usr/local/bin/ldid >/dev/null
+            sudo chmod +x /usr/local/bin/ldid
+          fi
+          ldid -h 2>&1 | head -2
+
       - name: Install Theos
         run: |
-          brew install ldid xz || true
           export THEOS=$HOME/theos
           git clone --recursive --depth 1 https://github.com/theos/theos.git $THEOS
           mkdir -p $THEOS/sdks
@@ -23,14 +43,31 @@ jobs:
           echo "THEOS=$THEOS" >> $GITHUB_ENV
           echo "$THEOS/bin" >> $GITHUB_PATH
 
+      - name: Link toolchain
+        run: |
+          BIN=$HOME/theos/toolchain/linux/iphone/bin
+          mkdir -p $BIN
+          for t in clang clang++ gcc g++ make; do
+            w=$(command -v $t); [ -n "$w" ] && ln -sf "$(readlink -f $w)" "$BIN/$t"
+          done
+          for t in ar ranlib nm strip objcopy objdump size; do
+            w=$(command -v llvm-$t || command -v $t)
+            [ -n "$w" ] && ln -sf "$(readlink -f $w)" "$BIN/$t"
+          done
+          ln -sf /usr/bin/ld64.lld "$BIN/ld64.lld" 2>/dev/null || true
+          ln -sf /usr/local/bin/ldid "$BIN/ldid"
+          ls -l $BIN
+
       - name: Build
         run: |
           export THEOS=$HOME/theos
           export PATH=$THEOS/bin:$PATH
           make clean || true
-          make package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1 2>&1 | tail -60
+          make package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1 \
+               LDFLAGS="-fuse-ld=lld" 2>&1 | tail -70 || true
           echo "--- on disk ---"
           ls -l packages 2>/dev/null || true
+          find .theos -name "*.dylib" 2>/dev/null || true
 
       - name: Collect
         if: always()
