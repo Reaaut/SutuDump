@@ -59,16 +59,29 @@ jobs:
             w=$(command -v llvm-$t || command -v $t)
             [ -n "$w" ] && ln -sf "$(readlink -f $w)" "$BIN/$t"
           done
-          LD64=$(command -v ld64.lld || command -v lld)
-          ln -sf "$(readlink -f $LD64)" "$BIN/ld"
-          ln -sf "$(readlink -f $LD64)" "$BIN/ld64"
+          # IMPORTANT: must keep the ld64.lld name, lld dispatches on argv[0]
+          if [ -x /usr/bin/ld64.lld ]; then
+            LD64=/usr/bin/ld64.lld
+          else
+            LLDREAL=$(command -v lld-14 || command -v lld)
+            sudo ln -sf "$(readlink -f $LLDREAL)" /usr/local/bin/ld64.lld
+            LD64=/usr/local/bin/ld64.lld
+          fi
+          ln -sf "$LD64" "$BIN/ld"
+          ln -sf "$LD64" "$BIN/ld64"
           ln -sf /usr/local/bin/ldid "$BIN/ldid"
           ls -l $BIN
+          echo "--- ld64 probe ---"
+          $LD64 --version 2>&1 | head -2 || true
 
       - name: Build
         run: |
+          set -o pipefail
           make clean || true
-          make package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1 2>&1 | tail -60
+          make package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1 2>&1 | tail -80 || true
+          echo "--- artifacts on disk ---"
+          ls -l packages 2>/dev/null || true
+          find .theos -name "*.dylib" 2>/dev/null || true
 
       - name: Collect
         if: always()
