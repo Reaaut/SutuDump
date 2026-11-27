@@ -10,19 +10,20 @@ static NSMutableArray<NSString *> *gPwds = nil;
 static NSString *gRoot = nil;
 static dispatch_queue_t gQ = nil;
 static __thread BOOL tBusy = NO;
+static __thread NSString *tCurPath = nil;   // 当前正在打开的归档路径
+
+static NSString *INNER_PW = @"2E@Qws#b9MQ6p4^sRS";
 
 static NSString *pickRoot(void) {
     NSFileManager *fm = NSFileManager.defaultManager;
     NSMutableArray *cands = [NSMutableArray array];
 
-    // 1) 宿主 App 自己的沙盒（注入微信就落到微信主路径）
     NSString *home = NSHomeDirectory();
     if (home.length) {
         [cands addObject:[home stringByAppendingPathComponent:@"Documents/sutu_dump"]];
         [cands addObject:[home stringByAppendingPathComponent:@"Library/sutu_dump"]];
         [cands addObject:[home stringByAppendingPathComponent:@"tmp/sutu_dump"]];
     }
-    // 2) 全局可写位置做兜底
     [cands addObject:@"/var/mobile/Documents/sutu_dump"];
     [cands addObject:@"/var/jb/var/mobile/Documents/sutu_dump"];
     [cands addObject:@"/var/tmp/sutu_dump"];
@@ -44,11 +45,11 @@ static void ensureInit(void) {
         gQ = dispatch_queue_create("com.yg.sutudump", DISPATCH_QUEUE_SERIAL);
         gRoot = pickRoot();
         NSFileManager *fm = NSFileManager.defaultManager;
-        for (NSString *sub in @[@"out", @"inbox", @"raw"]) {
+        for (NSString *sub in @[@"out", @"raw"]) {
             [fm createDirectoryAtPath:[gRoot stringByAppendingPathComponent:sub]
           withIntermediateDirectories:YES attributes:nil error:nil];
         }
-        NSLog(@"[SUTU] root=%@", gRoot);
+        NSLog(@"[SUTU] v3 root=%@", gRoot);
     });
 }
 
@@ -56,19 +57,44 @@ static void appendLine(NSString *file, NSString *line) {
     ensureInit();
     NSString *p = [gRoot stringByAppendingPathComponent:file];
     FILE *fp = fopen(p.UTF8String, "a");
-    if (fp) { fwrite(line.UTF8String, 1, strlen(line.UTF8String), fp); fclose(fp); }
+    if (fp) {
+        fwrite(line.UTF8String, 1, strlen(line.UTF8String), fp);
+        fclose(fp);
+    }
 }
 
-static void logPwd(NSString *pwd, NSString *src) {
+static BOOL isInner(NSString *pwd) {
+    return [pwd isEqualToString:INNER_PW];
+}
+
+// 输出：密码 \t 文件路径 \t 类型
+static void logPwd(NSString *pwd, NSString *src, NSString *path) {
     if (!pwd || pwd.length < 6) return;
     ensureInit();
+
+    NSString *key = [NSString stringWithFormat:@"%@|%@", pwd, path ?: @"-"];
     @synchronized (gSeen) {
-        if ([gSeen containsObject:pwd]) return;
-        [gSeen addObject:pwd];
-        [gPwds addObject:pwd];
+        if ([gSeen containsObject:key]) return;
+        [gSeen addObject:key];
+        if (![gPwds containsObject:pwd]) [gPwds addObject:pwd];
     }
-    appendLine(@"pwd.txt", [NSString stringWithFormat:@"%@\t%@\n", pwd, src]);
-    NSLog(@"[SUTU] PWD %@ (%@)", pwd, src);
+
+    BOOL inner = isInner(pwd);
+    NSString *kind = inner ? @"inner" : @"outer";
+    NSString *shortPath = path.lastPathComponent ?: @"-";
+
+    NSString *line = [NSString stringWithFormat:@"%@\t%@\t%@\t%@\n",
+                      pwd, shortPath, kind, src];
+    appendLine(inner ? @"inner.txt" : @"outer.txt", line);
+    // 同时写一份配对总表，方便脚本直接读
+    appendLine(@"pairs.txt", line);
+    NSLog(@"[SUTU] %@ pwd=%@ file=%@", kind, pwd, shortPath);
+
+    // 外层密码：把完整路径也记下来
+    if (!inner && path.length) {
+        appendLine(@"outer_paths.txt",
+                   [NSString stringWithFormat:@"%@\t%@\n", pwd, path]);
+    }
 }
 
 static BOOL isZip(NSData *d) {
@@ -79,8 +105,7 @@ static BOOL isZip(NSData *d) {
 
 static NSString *safeName(NSString *s) {
     NSCharacterSet *bad = [NSCharacterSet characterSetWithCharactersInString:@"/\\:*?\"<>|"];
-    NSArray *parts = [s componentsSeparatedByCharactersInSet:bad];
-    return [parts componentsJoinedByString:@"_"];
+    return [[s componentsSeparatedByCharactersInSet:bad] componentsJoinedByString:@"_"];
 }
 
 static NSArray *openEntries(id archive, NSString *pwd, NSError **err) {
@@ -107,15 +132,13 @@ static NSData *entryData(id entry, NSString *pwd) {
 }
 
 static id openArchive(NSURL *url) {
-    Class ZZArchive = NSClassFromString(@"ZZArchive");
-    if (!ZZArchive) return nil;
+    Class ZA = NSClassFromString(@"ZZArchive");
+    if (!ZA) return nil;
     SEL s = NSSelectorFromString(@"archiveWithURL:error:");
-    if (![ZZArchive respondsToSelector:s]) {
-        s = NSSelectorFromString(@"archiveWithURL:options:error:");
-        if (![ZZArchive respondsToSelector:s]) return nil;
-        return ((id (*)(id, SEL, NSURL *, id, NSError **))objc_msgSend)(ZZArchive, s, url, nil, NULL);
+    if ([ZA respondsToSelector:s]) {
+        return ((id (*)(id, SEL, NSURL *, NSError **))objc_msgSend)(ZA, s, url, NULL);
     }
-    return ((id (*)(id, SEL, NSURL *, NSError **))objc_msgSend)(ZZArchive, s, url, NULL);
+    return nil;
 }
 
 static void unpackData(NSData *data, NSString *hint, NSString *outDir, int depth) {
@@ -126,16 +149,14 @@ static void unpackData(NSData *data, NSString *hint, NSString *outDir, int depth
                      [NSString stringWithFormat:@"sd_%d_%u.zip", depth, arc4random()]];
     if (![data writeToFile:tmp atomically:YES]) return;
 
-    Class ZZArchive = NSClassFromString(@"ZZArchive");
-    if (!ZZArchive) { [fm removeItemAtPath:tmp error:nil]; return; }
-
+    if (!NSClassFromString(@"ZZArchive")) { [fm removeItemAtPath:tmp error:nil]; return; }
     id archive = openArchive([NSURL fileURLWithPath:tmp]);
     if (!archive) { [fm removeItemAtPath:tmp error:nil]; return; }
 
     NSMutableArray *cands = [NSMutableArray array];
     if (hint.length) [cands addObject:hint];
     @synchronized (gPwds) { [cands addObjectsFromArray:gPwds]; }
-    if (![cands containsObject:@"2E@Qws#b9MQ6p4^sRS"]) [cands addObject:@"2E@Qws#b9MQ6p4^sRS"];
+    if (![cands containsObject:INNER_PW]) [cands addObject:INNER_PW];
 
     NSArray *entries = nil;
     NSString *used = nil;
@@ -153,37 +174,51 @@ static void unpackData(NSData *data, NSString *hint, NSString *outDir, int depth
         if (![name isKindOfClass:NSString.class] || !name.length) continue;
         NSData *d = entryData(entry, used);
         if (!d.length) continue;
+        NSString *safe = safeName(name);
         if (isZip(d)) {
-            NSString *sub = [outDir stringByAppendingPathComponent:
-                             [safeName(name.lastPathComponent.stringByDeletingPathExtension) stringByAppendingString:@"_x"]];
-            unpackData(d, nil, sub, depth + 1);
+            unpackData(d, nil, [outDir stringByAppendingPathComponent:
+                                [safe.stringByDeletingPathExtension stringByAppendingString:@"_x"]],
+                       depth + 1);
         } else {
-            [d writeToFile:[outDir stringByAppendingPathComponent:safeName(name)] atomically:YES];
+            [d writeToFile:[outDir stringByAppendingPathComponent:safe] atomically:YES];
         }
     }
     [fm removeItemAtPath:tmp error:nil];
-    NSLog(@"[SUTU] unpacked %lu entries -> %@ (depth %d)", (unsigned long)entries.count, outDir, depth);
 }
 
 __attribute__((constructor)) static void sutudump_init(void) {
     ensureInit();
-    NSLog(@"[SUTU] v2 loaded, root=%@", gRoot);
+    NSLog(@"[SUTU] v3 loaded root=%@", gRoot);
 }
+
+#pragma mark - 记录“正在打开哪个包”
+
+%hook ZZArchive
++ (id)archiveWithURL:(NSURL *)url error:(NSError **)err {
+    tCurPath = url.path;
+    return %orig;
+}
+- (id)initWithURL:(NSURL *)url options:(id)opts error:(NSError **)err {
+    tCurPath = url.path;
+    return %orig;
+}
+%end
+
+#pragma mark - 密码抓取（带文件路径）
 
 %hook ZZOldArchiveEntry
 - (NSData *)newDataWithPassword:(NSString *)pwd error:(NSError **)err {
     NSData *d = %orig;
-    if (!tBusy && pwd.length) {
-        logPwd(pwd, @"ZZOld");
+    if (!tBusy && pwd.length > 0) {
+        NSString *path = tCurPath;
+        logPwd(pwd, @"ZZOld", path);
         if (isZip(d)) {
             NSData *copy = [d copy];
             NSString *p = [pwd copy];
+            NSString *tag = [path.lastPathComponent.stringByDeletingPathExtension copy] ?: @"pkg";
             dispatch_async(gQ, ^{
-                if (![copy writeToFile:[gRoot stringByAppendingPathComponent:
-                                        [NSString stringWithFormat:@"raw/%@.rbt", [p substringToIndex:MIN((NSUInteger)6, p.length)]]]
-                            atomically:YES]) {}
                 NSString *dir = [gRoot stringByAppendingPathComponent:
-                                 [NSString stringWithFormat:@"out/%@", [p substringToIndex:MIN((NSUInteger)6, p.length)]]];
+                                 [NSString stringWithFormat:@"out/%@", safeName(tag)]];
                 unpackData(copy, p, dir, 0);
             });
         }
@@ -195,24 +230,12 @@ __attribute__((constructor)) static void sutudump_init(void) {
 %hook ZZNewArchiveEntry
 - (NSData *)newDataWithPassword:(NSString *)pwd error:(NSError **)err {
     NSData *d = %orig;
-    if (!tBusy && pwd.length) logPwd(pwd, @"ZZNew");
+    if (!tBusy && pwd.length > 0) logPwd(pwd, @"ZZNew", tCurPath);
     return d;
 }
 %end
 
-%hook NSUserDefaults
-- (id)objectForKey:(NSString *)key {
-    id v = %orig;
-    if ([key isEqualToString:@"ThemeCurentAssetFloderNameKey"] && [v isKindOfClass:NSString.class]) {
-        NSString *s = (NSString *)v;
-        if (s.length) {
-            appendLine(@"theme_folder.txt", [s stringByAppendingString:@"\n"]);
-            NSLog(@"[SUTU] themeFolder=%@", s);
-        }
-    }
-    return v;
-}
-%end
+#pragma mark - 接口响应里的密码（不用下载也能抓）
 
 %hook NSJSONSerialization
 + (id)JSONObjectWithData:(NSData *)data options:(NSJSONReadingOptions)opt error:(NSError **)err {
@@ -233,7 +256,7 @@ __attribute__((constructor)) static void sutudump_init(void) {
                 NSString *cand = [s substringWithRange:m.range];
                 BOOL hasDigit = [cand rangeOfCharacterFromSet:[NSCharacterSet decimalDigitCharacterSet]].location != NSNotFound;
                 BOOL hasAlpha = [cand rangeOfCharacterFromSet:[NSCharacterSet letterCharacterSet]].location != NSNotFound;
-                if (hasDigit && hasAlpha) logPwd(cand, @"JSON");
+                if (hasDigit && hasAlpha) logPwd(cand, @"JSON", @"(api)");
             }];
         }
     }
